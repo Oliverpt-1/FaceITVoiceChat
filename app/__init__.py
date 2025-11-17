@@ -1,0 +1,2 @@
+"""Faceit Discord Bot Application."""
+
