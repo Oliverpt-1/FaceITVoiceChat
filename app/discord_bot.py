@@ -4,8 +4,15 @@ from discord import app_commands
 from discord.ext import commands
 from typing import Optional, List
 import aiohttp
-from app.config import DISCORD_TOKEN, DISCORD_GUILD_ID, FACEIT_API_KEY, FACEIT_API_URL, VC_CATEGORY_ID
+from app.config import (
+    DISCORD_TOKEN, DISCORD_GUILD_ID, FACEIT_API_KEY, FACEIT_API_URL, VC_CATEGORY_ID,
+    FACEIT_CLIENT_ID, FACEIT_REDIRECT_URI
+)
 from app.db import create_player_link, get_player_link_by_discord_id, init_db
+from app.auth_faceit import (
+    generate_code_verifier, generate_code_challenge, generate_state,
+    store_oauth_state, build_oauth_url
+)
 
 
 # In-memory cache for active matches (match_id -> voice_channel_id)
@@ -145,55 +152,58 @@ async def cleanup_vc(guild: discord.Guild, voice_channel_id: str) -> None:
         print(f"Error cleaning up VC {voice_channel_id}: {e}")
 
 
-@bot.tree.command(name="register", description="Register your Faceit nickname with the bot")
-@app_commands.describe(faceit_nickname="Your Faceit nickname")
-async def register_command(interaction: discord.Interaction, faceit_nickname: str):
-    """Register a Discord user with their Faceit nickname."""
+@bot.tree.command(name="verify", description="Verify your FaceIT account using OAuth2")
+async def verify_command(interaction: discord.Interaction):
+    """Generate OAuth2 URL for FaceIT account verification."""
     await interaction.response.defer(ephemeral=True)
+    
+    # Check if OAuth config is available
+    if not FACEIT_CLIENT_ID or not FACEIT_REDIRECT_URI:
+        await interaction.followup.send(
+            "❌ OAuth configuration is missing. Please contact the bot administrator.",
+            ephemeral=True
+        )
+        return
     
     # Check if user is already registered
     existing = get_player_link_by_discord_id(str(interaction.user.id))
     if existing:
         await interaction.followup.send(
-            f"You are already registered as: **{existing['faceit_nickname']}**",
+            f"You are already verified as: **{existing['faceit_nickname']}**\n"
+            f"If you want to link a different account, please contact an administrator.",
             ephemeral=True
         )
         return
     
-    # Search for player on Faceit
-    player_data = await search_faceit_player(faceit_nickname)
-    
-    if not player_data:
-        await interaction.followup.send(
-            f"Could not find Faceit player: **{faceit_nickname}**",
-            ephemeral=True
-        )
-        return
-    
-    faceit_id = player_data.get("player_id")
-    resolved_nickname = player_data.get("nickname", faceit_nickname)
-    
-    if not faceit_id:
-        await interaction.followup.send(
-            "Error: Could not retrieve Faceit ID from API response",
-            ephemeral=True
-        )
-        return
-    
-    # Create player link
     try:
-        create_player_link(
-            discord_id=str(interaction.user.id),
-            faceit_id=faceit_id,
-            faceit_nickname=resolved_nickname
+        # Generate PKCE values
+        code_verifier = generate_code_verifier()
+        code_challenge = generate_code_challenge(code_verifier)
+        
+        # Generate state for CSRF protection
+        state = generate_state()
+        
+        # Store state with Discord ID and code verifier
+        store_oauth_state(state, str(interaction.user.id), code_verifier)
+        
+        # Build OAuth URL
+        oauth_url = build_oauth_url(
+            client_id=FACEIT_CLIENT_ID,
+            redirect_uri=FACEIT_REDIRECT_URI,
+            code_challenge=code_challenge,
+            state=state
         )
+        
+        # Send OAuth URL to user
         await interaction.followup.send(
-            f"✅ Successfully registered as: **{resolved_nickname}** (ID: {faceit_id})",
+            f"✅ Click the link below to verify your FaceIT account:\n\n"
+            f"🔗 [**Verify with FaceIT**]({oauth_url})\n\n"
+            f"⚠️ This link will expire in 10 minutes.",
             ephemeral=True
         )
     except Exception as e:
         await interaction.followup.send(
-            f"❌ Error registering: {str(e)}",
+            f"❌ Error generating verification link: {str(e)}",
             ephemeral=True
         )
 

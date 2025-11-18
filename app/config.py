@@ -11,7 +11,7 @@ FACEIT_API_KEY: Optional[str] = os.getenv("FACEIT_API_KEY")
 FACEIT_API_URL: str = "https://open.faceit.com/data/v4"
 
 # Supabase Configuration
-SUPABASE_URL: Optional[str] = os.getenv("SUPABASE_URL")
+SUPABASE_URL: Optional[str] = os.getenv("SUPABASE_URL") 
 SUPABASE_KEY: Optional[str] = os.getenv("SUPABASE_KEY")
 
 # FastAPI Configuration
@@ -22,6 +22,13 @@ PORT: int = int(os.getenv("PORT", "8000"))
 # Discord VC Configuration
 VC_CATEGORY_ID: Optional[int] = int(os.getenv("VC_CATEGORY_ID", "0")) if os.getenv("VC_CATEGORY_ID") else None
 
+# FaceIT OAuth2 Configuration (PKCE flow - no client_secret needed)
+FACEIT_CLIENT_ID: Optional[str] = os.getenv("FACEIT_CLIENT_ID")
+FACEIT_REDIRECT_URI: Optional[str] = os.getenv("FACEIT_REDIRECT_URI")
+FACEIT_AUTH_URL: str = "https://accounts.faceit.com"
+FACEIT_TOKEN_URL: str = "https://api.faceit.com/auth/v1/oauth/token"
+FACEIT_USERINFO_URL: str = "https://api.faceit.com/auth/v1/resources/userinfo"
+
 def validate_config() -> bool:
     """Validate that all required configuration is present."""
     required = [
@@ -29,6 +36,8 @@ def validate_config() -> bool:
         SUPABASE_URL,
         SUPABASE_KEY,
         FACEIT_API_KEY,
+        FACEIT_CLIENT_ID,
+        FACEIT_REDIRECT_URI,
     ]
     return all(required)
 

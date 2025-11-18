@@ -1,16 +1,241 @@
 """FastAPI webhook server for Faceit events."""
-from fastapi import FastAPI, Request, HTTPException, Header
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, HTTPException, Header, Query
+from fastapi.responses import JSONResponse, HTMLResponse
 from typing import Optional, Dict, List, Any
 import json
 import discord
 import httpx # Import httpx
-from app.config import WEBHOOK_SECRET, DISCORD_GUILD_ID, FACEIT_API_KEY, VC_CATEGORY_ID # Import VC_CATEGORY_ID
-from app.db import get_player_links_by_faceit_ids, create_active_match, delete_active_match, get_active_matches_by_match_id # Add get_active_matches_by_match_id
-from app.discord_bot import bot, active_match_cache, create_private_vc_and_move_users, cleanup_vc # Add cleanup_vc
+from app.config import (
+    WEBHOOK_SECRET, DISCORD_GUILD_ID, FACEIT_API_KEY, VC_CATEGORY_ID,
+    FACEIT_CLIENT_ID, FACEIT_REDIRECT_URI, FACEIT_TOKEN_URL, FACEIT_USERINFO_URL
+)
+from app.db import (
+    get_player_links_by_faceit_ids, create_active_match, delete_active_match,
+    get_active_matches_by_match_id, create_player_link
+)
+from app.discord_bot import bot, active_match_cache, create_private_vc_and_move_users, cleanup_vc
+from app.auth_faceit import get_oauth_state, delete_oauth_state
 
 
 app = FastAPI(title="Faceit Webhook Server")
+
+
+@app.get("/faceit/callback")
+async def faceit_oauth_callback(
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    error_description: Optional[str] = Query(None)
+):
+    """
+    OAuth2 callback endpoint for FaceIT account verification.
+    
+    FaceIT redirects here after user authorization with:
+    - code: Authorization code (if successful)
+    - state: State token for CSRF protection
+    - error: Error code (if failed)
+    - error_description: Error description (if failed)
+    """
+    # Handle OAuth errors
+    if error:
+        error_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><title>FaceIT Verification Failed</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h1>❌ Verification Failed</h1>
+            <p>{error_description or error}</p>
+            <p>Please try again using the /verify command in Discord.</p>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=error_html, status_code=400)
+    
+    # Validate required parameters
+    if not code or not state:
+        error_html = """
+        <!DOCTYPE html>
+        <html>
+        <head><title>FaceIT Verification Failed</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h1>❌ Invalid Request</h1>
+            <p>Missing authorization code or state parameter.</p>
+            <p>Please try again using the /verify command in Discord.</p>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=error_html, status_code=400)
+    
+    # Validate state
+    state_data = get_oauth_state(state)
+    if not state_data:
+        error_html = """
+        <!DOCTYPE html>
+        <html>
+        <head><title>FaceIT Verification Failed</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h1>❌ Invalid or Expired Link</h1>
+            <p>The verification link has expired or is invalid.</p>
+            <p>Please try again using the /verify command in Discord.</p>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=error_html, status_code=400)
+    
+    discord_id = state_data["discord_id"]
+    code_verifier = state_data["code_verifier"]
+    
+    try:
+        # Exchange authorization code for access token
+        token_data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": FACEIT_REDIRECT_URI,
+            "client_id": FACEIT_CLIENT_ID,
+            "code_verifier": code_verifier
+        }
+        
+        async with httpx.AsyncClient() as client:
+            # POST to token endpoint (JSON body, no client_secret)
+            token_response = await client.post(
+                FACEIT_TOKEN_URL,
+                json=token_data,
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if token_response.status_code != 200:
+                print(f"Token exchange failed: {token_response.status_code} - {token_response.text}")
+                error_html = """
+                <!DOCTYPE html>
+                <html>
+                <head><title>FaceIT Verification Failed</title></head>
+                <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+                    <h1>❌ Verification Failed</h1>
+                    <p>Failed to exchange authorization code for token.</p>
+                    <p>Please try again using the /verify command in Discord.</p>
+                </body>
+                </html>
+                """
+                return HTMLResponse(content=error_html, status_code=500)
+            
+            token_json = token_response.json()
+            access_token = token_json.get("access_token")
+            
+            if not access_token:
+                print(f"No access token in response: {token_json}")
+                error_html = """
+                <!DOCTYPE html>
+                <html>
+                <head><title>FaceIT Verification Failed</title></head>
+                <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+                    <h1>❌ Verification Failed</h1>
+                    <p>No access token received from FaceIT.</p>
+                    <p>Please try again using the /verify command in Discord.</p>
+                </body>
+                </html>
+                """
+                return HTMLResponse(content=error_html, status_code=500)
+            
+            # Fetch user info
+            userinfo_response = await client.get(
+                FACEIT_USERINFO_URL,
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+            
+            if userinfo_response.status_code != 200:
+                print(f"Userinfo fetch failed: {userinfo_response.status_code} - {userinfo_response.text}")
+                error_html = """
+                <!DOCTYPE html>
+                <html>
+                <head><title>FaceIT Verification Failed</title></head>
+                <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+                    <h1>❌ Verification Failed</h1>
+                    <p>Failed to fetch user information from FaceIT.</p>
+                    <p>Please try again using the /verify command in Discord.</p>
+                </body>
+                </html>
+                """
+                return HTMLResponse(content=error_html, status_code=500)
+            
+            userinfo = userinfo_response.json()
+            
+            # Extract FaceIT user ID and nickname
+            # FaceIT userinfo returns 'guid' as the user ID
+            faceit_id = userinfo.get("guid") or userinfo.get("id") or userinfo.get("sub")
+            faceit_nickname = userinfo.get("nickname") or userinfo.get("name")
+            
+            if not faceit_id:
+                print(f"No FaceIT ID in userinfo: {userinfo}")
+                error_html = """
+                <!DOCTYPE html>
+                <html>
+                <head><title>FaceIT Verification Failed</title></head>
+                <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+                    <h1>❌ Verification Failed</h1>
+                    <p>Could not retrieve FaceIT user ID.</p>
+                    <p>Please try again using the /verify command in Discord.</p>
+                </body>
+                </html>
+                """
+                return HTMLResponse(content=error_html, status_code=500)
+            
+            # Store in database
+            try:
+                create_player_link(
+                    discord_id=discord_id,
+                    faceit_id=faceit_id,
+                    faceit_nickname=faceit_nickname or "Unknown",
+                    verified_method="oauth"
+                )
+                
+                # Delete state after successful verification
+                delete_oauth_state(state)
+                
+                # Success page
+                success_html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head><title>FaceIT Verification Success</title></head>
+                <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+                    <h1>✅ Verification Successful!</h1>
+                    <p>Your FaceIT account <strong>{faceit_nickname or 'Unknown'}</strong> has been linked to your Discord account.</p>
+                    <p>You can close this window and return to Discord.</p>
+                </body>
+                </html>
+                """
+                return HTMLResponse(content=success_html)
+                
+            except Exception as db_error:
+                print(f"Database error: {db_error}")
+                error_html = """
+                <!DOCTYPE html>
+                <html>
+                <head><title>FaceIT Verification Failed</title></head>
+                <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+                    <h1>❌ Verification Failed</h1>
+                    <p>Failed to save verification to database.</p>
+                    <p>Please try again using the /verify command in Discord.</p>
+                </body>
+                </html>
+                """
+                return HTMLResponse(content=error_html, status_code=500)
+                
+    except Exception as e:
+        print(f"OAuth callback error: {e}")
+        import traceback
+        traceback.print_exc()
+        error_html = """
+        <!DOCTYPE html>
+        <html>
+        <head><title>FaceIT Verification Failed</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h1>❌ Verification Failed</h1>
+            <p>An unexpected error occurred during verification.</p>
+            <p>Please try again using the /verify command in Discord.</p>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=error_html, status_code=500)
 
 
 @app.post("/faceit-webhook")
