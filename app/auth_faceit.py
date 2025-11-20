@@ -85,6 +85,6 @@ def build_oauth_url(
         "code_challenge_method": "S256"
     }
     
-    base_url = "https://accounts.faceit.com"
+    base_url = "https://accounts.faceit.com/authorize"
     return f"{base_url}?{urlencode(params)}"
 
