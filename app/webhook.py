@@ -36,8 +36,13 @@ async def faceit_oauth_callback(
     - error: Error code (if failed)
     - error_description: Error description (if failed)
     """
+    print(f"[CALLBACK] ===== OAuth callback received =====")
+    print(f"[CALLBACK] Code present: {code is not None}, State present: {state is not None}")
+    print(f"[CALLBACK] Error: {error}, Error description: {error_description}")
+    
     # Handle OAuth errors
     if error:
+        print(f"[CALLBACK] OAuth error received: {error} - {error_description}")
         error_html = f"""
         <!DOCTYPE html>
         <html>
@@ -53,6 +58,7 @@ async def faceit_oauth_callback(
     
     # Validate required parameters
     if not code or not state:
+        print(f"[CALLBACK] Missing required parameters - code: {code is not None}, state: {state is not None}")
         error_html = """
         <!DOCTYPE html>
         <html>
@@ -67,8 +73,10 @@ async def faceit_oauth_callback(
         return HTMLResponse(content=error_html, status_code=400)
     
     # Validate state
+    print(f"[CALLBACK] Validating state: {state[:20]}...")
     state_data = get_oauth_state(state)
     if not state_data:
+        print(f"[CALLBACK] State validation failed - state not found or expired")
         error_html = """
         <!DOCTYPE html>
         <html>
@@ -84,9 +92,11 @@ async def faceit_oauth_callback(
     
     discord_id = state_data["discord_id"]
     code_verifier = state_data["code_verifier"]
+    print(f"[CALLBACK] State validated successfully - Discord ID: {discord_id}")
     
     try:
         # Exchange authorization code for access token
+        print(f"[CALLBACK] Attempting token exchange...")
         token_data = {
             "grant_type": "authorization_code",
             "code": code,
@@ -103,8 +113,9 @@ async def faceit_oauth_callback(
                 headers={"Content-Type": "application/json"}
             )
             
+            print(f"[CALLBACK] Token exchange response status: {token_response.status_code}")
             if token_response.status_code != 200:
-                print(f"Token exchange failed: {token_response.status_code} - {token_response.text}")
+                print(f"[CALLBACK] Token exchange failed: {token_response.status_code} - {token_response.text}")
                 error_html = """
                 <!DOCTYPE html>
                 <html>
@@ -120,6 +131,7 @@ async def faceit_oauth_callback(
             
             token_json = token_response.json()
             access_token = token_json.get("access_token")
+            print(f"[CALLBACK] Token exchange successful - Access token received: {access_token is not None}")
             
             if not access_token:
                 print(f"No access token in response: {token_json}")
@@ -137,11 +149,13 @@ async def faceit_oauth_callback(
                 return HTMLResponse(content=error_html, status_code=500)
             
             # Fetch user info
+            print(f"[CALLBACK] Fetching userinfo from: {FACEIT_USERINFO_URL}")
             userinfo_response = await client.get(
                 FACEIT_USERINFO_URL,
                 headers={"Authorization": f"Bearer {access_token}"}
             )
             
+            print(f"[CALLBACK] Userinfo response status: {userinfo_response.status_code}")
             if userinfo_response.status_code != 200:
                 print(f"Userinfo fetch failed: {userinfo_response.status_code} - {userinfo_response.text}")
                 error_html = """
@@ -158,11 +172,13 @@ async def faceit_oauth_callback(
                 return HTMLResponse(content=error_html, status_code=500)
             
             userinfo = userinfo_response.json()
+            print(f"[CALLBACK] Userinfo received: {json.dumps(userinfo, indent=2)}")
             
             # Extract FaceIT user ID and nickname
             # FaceIT userinfo returns 'guid' as the user ID
             faceit_id = userinfo.get("guid") or userinfo.get("id") or userinfo.get("sub")
             faceit_nickname = userinfo.get("nickname") or userinfo.get("name")
+            print(f"[CALLBACK] Extracted - FaceIT ID: {faceit_id}, Nickname: {faceit_nickname}")
             
             if not faceit_id:
                 print(f"No FaceIT ID in userinfo: {userinfo}")
@@ -180,16 +196,19 @@ async def faceit_oauth_callback(
                 return HTMLResponse(content=error_html, status_code=500)
             
             # Store in database
+            print(f"[CALLBACK] Attempting to store in database - Discord ID: {discord_id}, FaceIT ID: {faceit_id}, Nickname: {faceit_nickname}")
             try:
-                create_player_link(
+                result = create_player_link(
                     discord_id=discord_id,
                     faceit_id=faceit_id,
                     faceit_nickname=faceit_nickname or "Unknown",
                     verified_method="oauth"
                 )
+                print(f"[CALLBACK] Database insertion successful: {result}")
                 
                 # Delete state after successful verification
                 delete_oauth_state(state)
+                print(f"[CALLBACK] OAuth state deleted, returning success page")
                 
                 # Success page
                 success_html = f"""
@@ -206,7 +225,9 @@ async def faceit_oauth_callback(
                 return HTMLResponse(content=success_html)
                 
             except Exception as db_error:
-                print(f"Database error: {db_error}")
+                print(f"[CALLBACK] Database error: {db_error}")
+                import traceback
+                traceback.print_exc()
                 error_html = """
                 <!DOCTYPE html>
                 <html>
@@ -221,7 +242,7 @@ async def faceit_oauth_callback(
                 return HTMLResponse(content=error_html, status_code=500)
                 
     except Exception as e:
-        print(f"OAuth callback error: {e}")
+        print(f"[CALLBACK] OAuth callback error: {e}")
         import traceback
         traceback.print_exc()
         error_html = """
