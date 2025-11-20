@@ -106,11 +106,11 @@ async def faceit_oauth_callback(
         }
         
         async with httpx.AsyncClient() as client:
-            # POST to token endpoint (JSON body, no client_secret)
+            # POST to token endpoint (form-encoded body, no client_secret)
             token_response = await client.post(
                 FACEIT_TOKEN_URL,
-                json=token_data,
-                headers={"Content-Type": "application/json"}
+                data=token_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
             
             print(f"[CALLBACK] Token exchange response status: {token_response.status_code}")
