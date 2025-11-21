@@ -3,11 +3,12 @@ from fastapi import FastAPI, Request, HTTPException, Header, Query
 from fastapi.responses import JSONResponse, HTMLResponse
 from typing import Optional, Dict, List, Any
 import json
+import base64
 import discord
 import httpx # Import httpx
 from app.config import (
     WEBHOOK_SECRET, DISCORD_GUILD_ID, FACEIT_API_KEY, VC_CATEGORY_ID,
-    FACEIT_CLIENT_ID, FACEIT_REDIRECT_URI, FACEIT_TOKEN_URL, FACEIT_USERINFO_URL
+    FACEIT_CLIENT_ID, FACEIT_CLIENT_SECRET, FACEIT_REDIRECT_URI, FACEIT_TOKEN_URL, FACEIT_USERINFO_URL
 )
 from app.db import (
     get_player_links_by_faceit_ids, create_active_match, delete_active_match,
@@ -97,6 +98,12 @@ async def faceit_oauth_callback(
     try:
         # Exchange authorization code for access token
         print(f"[CALLBACK] Attempting token exchange...")
+        print(f"[CALLBACK] Token endpoint: {FACEIT_TOKEN_URL}")
+        print(f"[CALLBACK] Client ID: {FACEIT_CLIENT_ID}")
+        print(f"[CALLBACK] Redirect URI: {FACEIT_REDIRECT_URI}")
+        print(f"[CALLBACK] Code: {code}")
+        print(f"[CALLBACK] Code verifier (first 10 chars): {code_verifier[:10]}...")
+        
         token_data = {
             "grant_type": "authorization_code",
             "code": code,
@@ -105,15 +112,42 @@ async def faceit_oauth_callback(
             "code_verifier": code_verifier
         }
         
+        print(f"[CALLBACK] Token request data: {token_data}")
+        
+        # Prepare HTTP Basic Authentication
+        if not FACEIT_CLIENT_SECRET:
+            print(f"[CALLBACK] ERROR: FACEIT_CLIENT_SECRET not configured!")
+            error_html = """
+            <!DOCTYPE html>
+            <html>
+            <head><title>FaceIT Verification Failed</title></head>
+            <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+                <h1>❌ Configuration Error</h1>
+                <p>Client Secret is not configured. Please contact the administrator.</p>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=error_html, status_code=500)
+        
+        # Create Basic Auth header: base64(client_id:client_secret)
+        credentials = f"{FACEIT_CLIENT_ID}:{FACEIT_CLIENT_SECRET}"
+        encoded_credentials = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
+        auth_header = f"Basic {encoded_credentials}"
+        
         async with httpx.AsyncClient() as client:
-            # POST to token endpoint (form-encoded body, no client_secret)
+            # POST to token endpoint with HTTP Basic Auth (per FaceIT documentation)
+            # Body includes code_verifier for PKCE
             token_response = await client.post(
                 FACEIT_TOKEN_URL,
                 data=token_data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Authorization": auth_header
+                }
             )
             
             print(f"[CALLBACK] Token exchange response status: {token_response.status_code}")
+            print(f"[CALLBACK] Token exchange response headers: {dict(token_response.headers)}")
             if token_response.status_code != 200:
                 print(f"[CALLBACK] Token exchange failed: {token_response.status_code} - {token_response.text}")
                 error_html = """

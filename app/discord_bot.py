@@ -187,12 +187,14 @@ async def verify_command(interaction: discord.Interaction):
         store_oauth_state(state, str(interaction.user.id), code_verifier)
         
         # Build OAuth URL
+        print(f"[VERIFY] Building OAuth URL with redirect_uri: {FACEIT_REDIRECT_URI}")
         oauth_url = build_oauth_url(
             client_id=FACEIT_CLIENT_ID,
             redirect_uri=FACEIT_REDIRECT_URI,
             code_challenge=code_challenge,
             state=state
         )
+        print(f"[VERIFY] Generated OAuth URL: {oauth_url}")
         
         # Send OAuth URL to user
         await interaction.followup.send(

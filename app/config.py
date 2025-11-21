@@ -22,8 +22,9 @@ PORT: int = int(os.getenv("PORT", "8000"))
 # Discord VC Configuration
 VC_CATEGORY_ID: Optional[int] = int(os.getenv("VC_CATEGORY_ID", "0")) if os.getenv("VC_CATEGORY_ID") else None
 
-# FaceIT OAuth2 Configuration (PKCE flow - no client_secret needed)
+# FaceIT OAuth2 Configuration (PKCE flow with Basic Auth for token exchange)
 FACEIT_CLIENT_ID: Optional[str] = os.getenv("FACEIT_CLIENT_ID")
+FACEIT_CLIENT_SECRET: Optional[str] = os.getenv("FACEIT_CLIENT_SECRET")
 FACEIT_REDIRECT_URI: Optional[str] = os.getenv("FACEIT_REDIRECT_URI")
 FACEIT_AUTH_URL: str = "https://accounts.faceit.com"
 FACEIT_TOKEN_URL: str = "https://api.faceit.com/auth/v1/oauth/token"
