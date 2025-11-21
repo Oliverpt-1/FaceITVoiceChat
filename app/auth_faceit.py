@@ -82,7 +82,8 @@ def build_oauth_url(
         "scope": scope,
         "state": state,
         "code_challenge": code_challenge,
-        "code_challenge_method": "S256"
+        "code_challenge_method": "S256",
+        "redirect_popup": "true"
     }
     
     base_url = "https://accounts.faceit.com/authorize"
