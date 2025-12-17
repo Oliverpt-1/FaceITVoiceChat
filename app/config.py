@@ -21,6 +21,7 @@ PORT: int = int(os.getenv("PORT", "8000"))
 
 # Discord VC Configuration
 VC_CATEGORY_ID: Optional[int] = int(os.getenv("VC_CATEGORY_ID", "0")) if os.getenv("VC_CATEGORY_ID") else None
+LOBBY_VC_ID: int = 1436915793605562543  # Hardcoded lobby voice channel ID
 
 # FaceIT OAuth2 Configuration (PKCE flow with Basic Auth for token exchange)
 FACEIT_CLIENT_ID: Optional[str] = os.getenv("FACEIT_CLIENT_ID")

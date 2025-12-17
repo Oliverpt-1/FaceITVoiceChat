@@ -71,10 +71,12 @@ async def create_private_vc_and_move_users(
     user_ids: List[int],
     match_id: str,
     faction: str,
-    category_id: Optional[int] = None
+    category_id: Optional[int] = None,
+    lobby_vc_id: Optional[int] = None
 ) -> Optional[discord.VoiceChannel]:
     """
     Create a private voice channel for a specific faction and move users into it.
+    Only moves users who are currently in the lobby VC.
     
     Args:
         guild: Discord guild/server
@@ -82,6 +84,7 @@ async def create_private_vc_and_move_users(
         match_id: Match ID for channel naming
         faction: The faction (e.g., 'faction1', 'faction2') for channel naming.
         category_id: Optional category ID to create channel in
+        lobby_vc_id: Optional lobby VC ID - only users in this VC will be moved
     
     Returns:
         Created VoiceChannel or None if failed
@@ -93,6 +96,13 @@ async def create_private_vc_and_move_users(
             category = guild.get_channel(category_id)
             if not isinstance(category, discord.CategoryChannel):
                 category = None
+        
+        # Get lobby VC if provided
+        lobby_vc = None
+        if lobby_vc_id:
+            lobby_vc = guild.get_channel(lobby_vc_id)
+            if not isinstance(lobby_vc, discord.VoiceChannel):
+                lobby_vc = None
         
         # Create private voice channel
         overwrites = {
@@ -116,20 +126,36 @@ async def create_private_vc_and_move_users(
             overwrites=overwrites
         )
         
-        # Move users into the voice channel
+        # Move users from lobby VC into the new voice channel
+        moved_count = 0
         for user_id in user_ids:
             member = guild.get_member(user_id)
-            if member and member.voice:
-                try:
-                    await member.move_to(vc)
-                except discord.HTTPException:
-                    # User might not be in a voice channel, skip
-                    pass
+            if member and member.voice and member.voice.channel:
+                # Check if user is in lobby VC (if lobby_vc_id is provided)
+                if lobby_vc:
+                    if member.voice.channel.id == lobby_vc.id:
+                        try:
+                            await member.move_to(vc)
+                            moved_count += 1
+                        except discord.HTTPException as e:
+                            print(f"Could not move user {member.id} from lobby to team VC: {e}")
+                    else:
+                        print(f"User {member.id} is not in lobby VC, skipping move")
+                else:
+                    # No lobby VC specified, move any user in a VC
+                    try:
+                        await member.move_to(vc)
+                        moved_count += 1
+                    except discord.HTTPException as e:
+                        print(f"Could not move user {member.id} to team VC: {e}")
         
+        print(f"Moved {moved_count} users from lobby to {vc.name}")
         return vc
     
     except Exception as e:
         print(f"Error creating VC: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 

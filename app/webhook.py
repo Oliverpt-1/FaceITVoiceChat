@@ -7,14 +7,14 @@ import base64
 import discord
 import httpx # Import httpx
 from app.config import (
-    WEBHOOK_SECRET, DISCORD_GUILD_ID, FACEIT_API_KEY, VC_CATEGORY_ID,
+    WEBHOOK_SECRET, DISCORD_GUILD_ID, FACEIT_API_KEY, VC_CATEGORY_ID, LOBBY_VC_ID,
     FACEIT_CLIENT_ID, FACEIT_CLIENT_SECRET, FACEIT_REDIRECT_URI, FACEIT_TOKEN_URL, FACEIT_USERINFO_URL
 )
 from app.db import (
-    get_player_links_by_faceit_ids, create_active_match, delete_active_match,
-    get_active_matches_by_match_id, create_player_link
+    get_player_links_by_faceit_ids, create_player_link,
+    create_match, get_match, update_match_status, update_match_vc_ids
 )
-from app.discord_bot import bot, active_match_cache, create_private_vc_and_move_users, cleanup_vc
+from app.discord_bot import bot, create_private_vc_and_move_users, cleanup_vc
 from app.auth_faceit import get_oauth_state, delete_oauth_state
 
 
@@ -302,8 +302,10 @@ async def faceit_webhook(
     FastAPI route to handle Faceit webhook events.
     
     Expected events:
-    - match_object_created: Create VC, move players
-    - match_status_finished: Delete VC, clean up
+    - match_object_created: Store match data in DB (status=created)
+    - match_status_configuring: Update match status (status=configuring)
+    - match_status_ready: Create VCs, move players from lobby, update status (status=ready)
+    - match_status_finished/aborted/cancelled: Delete VCs, update status (status=closed)
     
     Route signature:
     POST /faceit-webhook
@@ -346,7 +348,13 @@ async def faceit_webhook(
             )
 
         # Handle different event types
-        if event_type == "match_status_ready":
+        if event_type == "match_object_created":
+            print(f"Processing match_object_created for match_id: {match_id}")
+            await handle_match_created(match_id, payload)
+        elif event_type == "match_status_configuring":
+            print(f"Processing match_status_configuring for match_id: {match_id}")
+            await handle_match_configuring(match_id, payload)
+        elif event_type == "match_status_ready":
             print(f"Processing match_status_ready for match_id: {match_id}")
             await handle_match_ready(match_id, payload)
         elif event_type in ["match_status_finished", "match_status_aborted", "match_status_cancelled"]:
@@ -394,55 +402,157 @@ async def fetch_match_data(match_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def handle_match_ready(match_id: str, payload: Dict[str, Any]) -> None:
+async def handle_match_created(match_id: str, payload: Dict[str, Any]) -> None:
     """
-    Handle match_status_ready event.
+    Handle match_object_created event.
     
     Actions:
     1. Fetch detailed match data from Faceit API.
-    2. Extract player Faceit IDs for both factions.
-    3. For each faction: Map Faceit IDs -> Discord IDs, create private VC, move users, store in DB.
+    2. Extract teams, players, entity name, map.
+    3. Store match data in matches table with status = "created".
     """
-    print(f"Handling match_status_ready for match {match_id}")
+    print(f"Handling match_object_created for match {match_id}")
+    
+    # Check if match already exists (idempotency)
+    existing_match = get_match(match_id)
+    if existing_match:
+        print(f"Match {match_id} already exists in database, skipping creation")
+        return
     
     match_data = await fetch_match_data(match_id)
     if not match_data:
         print(f"Could not fetch detailed match data for {match_id}")
         return
+    
+    # Extract match information
+    entity_name = match_data.get("entity", {}).get("name")
+    teams_data = match_data.get("teams", {})
+    
+    faction1_data = teams_data.get("faction1", {})
+    faction1_name = faction1_data.get("name")
+    faction1_players = [player.get("player_id") for player in faction1_data.get("roster", []) if player.get("player_id")]
+    
+    faction2_data = teams_data.get("faction2", {})
+    faction2_name = faction2_data.get("name")
+    faction2_players = [player.get("player_id") for player in faction2_data.get("roster", []) if player.get("player_id")]
+    
+    map_picked = None
+    if match_data.get("voting", {}).get("map", {}).get("pick"):
+        map_picked = match_data["voting"]["map"]["pick"][0]
+    
+    # Store match in database
+    create_match(
+        match_id=match_id,
+        entity_name=entity_name,
+        faction1_name=faction1_name,
+        faction2_name=faction2_name,
+        faction1_players=faction1_players,
+        faction2_players=faction2_players,
+        map_picked=map_picked,
+        status="created"
+    )
+    print(f"Stored match {match_id} in database with status=created")
+
+
+async def handle_match_configuring(match_id: str, payload: Dict[str, Any]) -> None:
+    """
+    Handle match_status_configuring event.
+    
+    Actions:
+    1. Update match status to "configuring".
+    """
+    print(f"Handling match_status_configuring for match {match_id}")
+    
+    match = get_match(match_id)
+    if not match:
+        print(f"Match {match_id} not found in database, ignoring configuring event")
+        return
+    
+    update_match_status(match_id, "configuring")
+    print(f"Updated match {match_id} status to configuring")
+
+
+async def handle_match_ready(match_id: str, payload: Dict[str, Any]) -> None:
+    """
+    Handle match_status_ready event.
+    
+    Actions:
+    1. Verify match exists in database.
+    2. Create voice channels for both factions.
+    3. Move users from lobby VC to their team VC.
+    4. Update matches table with VC IDs and status = "ready".
+    """
+    print(f"Handling match_status_ready for match {match_id}")
+    
+    # Check if match exists in database
+    match = get_match(match_id)
+    if not match:
+        print(f"Match {match_id} not found in database, fetching from API and creating record")
+        # If match doesn't exist, create it first
+        await handle_match_created(match_id, payload)
+        match = get_match(match_id)
+        if not match:
+            print(f"Failed to create match {match_id}")
+            return
 
     guild = bot.get_guild(DISCORD_GUILD_ID) if DISCORD_GUILD_ID else None
     if not guild:
         print(f"Guild not found: {DISCORD_GUILD_ID}")
         return
 
-    teams_data = match_data.get("teams", {})
-    factions = ["faction1", "faction2"]
+    # Get lobby VC
+    lobby_vc = guild.get_channel(LOBBY_VC_ID) if LOBBY_VC_ID else None
+    if not lobby_vc:
+        print(f"Lobby VC {LOBBY_VC_ID} not found")
 
-    for faction_name in factions:
-        faction_data = teams_data.get(faction_name, {})
-        roster = faction_data.get("roster", [])
-        
-        faceit_player_ids: List[str] = [player["player_id"] for player in roster if "player_id" in player]
-        
-        if not faceit_player_ids:
-            print(f"Warning: No Faceit player IDs found for {faction_name} in match {match_id}")
-            continue
+    # Get player Faceit IDs from match record
+    faction1_players = match.get("faction1_players", [])
+    faction2_players = match.get("faction2_players", [])
+    
+    faction1_vc_id = None
+    faction2_vc_id = None
 
-        player_links = get_player_links_by_faceit_ids(faceit_player_ids)
+    # Process faction1
+    if faction1_players:
+        player_links = get_player_links_by_faceit_ids(faction1_players)
         discord_user_ids: List[int] = [
             int(link["discord_id"])
             for faceit_id, link in player_links.items()
             if link.get("discord_id")
         ]
         
-        if not discord_user_ids:
-            print(f"No linked Discord users found for {faction_name} in match {match_id}")
-            # Still create VC even if no users, as per previous logic
-
-        vc = await create_private_vc_and_move_users(guild, discord_user_ids, match_id, faction_name, VC_CATEGORY_ID)
+        vc = await create_private_vc_and_move_users(
+            guild, discord_user_ids, match_id, "faction1", VC_CATEGORY_ID, LOBBY_VC_ID
+        )
         if vc:
-            create_active_match(match_id, faction_name, str(vc.id))
-            print(f"Created VC {vc.id} for match {match_id} faction {faction_name}")
+            faction1_vc_id = str(vc.id)
+            print(f"Created VC {vc.id} for match {match_id} faction1")
+    else:
+        print(f"Warning: No players found for faction1 in match {match_id}")
+
+    # Process faction2
+    if faction2_players:
+        player_links = get_player_links_by_faceit_ids(faction2_players)
+        discord_user_ids: List[int] = [
+            int(link["discord_id"])
+            for faceit_id, link in player_links.items()
+            if link.get("discord_id")
+        ]
+        
+        vc = await create_private_vc_and_move_users(
+            guild, discord_user_ids, match_id, "faction2", VC_CATEGORY_ID, LOBBY_VC_ID
+        )
+        if vc:
+            faction2_vc_id = str(vc.id)
+            print(f"Created VC {vc.id} for match {match_id} faction2")
+    else:
+        print(f"Warning: No players found for faction2 in match {match_id}")
+
+    # Update matches table with VC IDs and status
+    if faction1_vc_id or faction2_vc_id:
+        update_match_vc_ids(match_id, faction1_vc_id, faction2_vc_id)
+        update_match_status(match_id, "ready")
+        print(f"Updated match {match_id} with VC IDs and status=ready")
 
 
 async def handle_match_cleanup(match_id: str, payload: Dict[str, Any]) -> None:
@@ -450,15 +560,15 @@ async def handle_match_cleanup(match_id: str, payload: Dict[str, Any]) -> None:
     Handle match cleanup events (finished, aborted, cancelled).
     
     Actions:
-    1. Fetch all voice channel IDs for the match from the DB.
-    2. Delete each voice channel.
-    3. Delete all active match records for the match from the DB.
+    1. Get match from database.
+    2. Delete both voice channels (faction1_vc_id and faction2_vc_id).
+    3. Update match status to "closed" and set finished_at timestamp.
     """
     print(f"Handling match cleanup for match {match_id}")
     
-    active_matches = get_active_matches_by_match_id(match_id)
-    if not active_matches:
-        print(f"No active matches found for {match_id} to clean up.")
+    match = get_match(match_id)
+    if not match:
+        print(f"Match {match_id} not found in database, nothing to clean up")
         return
 
     guild = bot.get_guild(DISCORD_GUILD_ID) if DISCORD_GUILD_ID else None
@@ -466,19 +576,19 @@ async def handle_match_cleanup(match_id: str, payload: Dict[str, Any]) -> None:
         print(f"Guild not found: {DISCORD_GUILD_ID}")
         return
 
-    for match_record in active_matches:
-        voice_channel_id = match_record.get("voice_channel_id")
-        faction_name = match_record.get("faction")
+    # Delete faction1 VC if it exists
+    faction1_vc_id = match.get("faction1_vc_id")
+    if faction1_vc_id:
+        await cleanup_vc(guild, faction1_vc_id)
+        print(f"Deleted VC {faction1_vc_id} for match {match_id} faction1")
 
-        if voice_channel_id:
-            await cleanup_vc(guild, voice_channel_id)
-        
-        # Delete from database for this specific faction
-        delete_active_match(match_id, faction_name)
-        print(f"Deleted active match record for {match_id} faction {faction_name}")
+    # Delete faction2 VC if it exists
+    faction2_vc_id = match.get("faction2_vc_id")
+    if faction2_vc_id:
+        await cleanup_vc(guild, faction2_vc_id)
+        print(f"Deleted VC {faction2_vc_id} for match {match_id} faction2")
 
-    # The cache for active_match_cache is currently designed for single VC per match_id. 
-    # With faction support, it should ideally be updated to store {match_id: {faction: channel_id}}.
-    # For now, relying on DB for cleanup. If cache is still used, it needs adjustment.
-    # active_match_cache.pop(match_id, None) # This would remove all, but not ideal if we intend to manage per-faction in cache
+    # Update match status to closed
+    update_match_status(match_id, "closed")
+    print(f"Updated match {match_id} status to closed")
 
